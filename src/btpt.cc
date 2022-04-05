@@ -29,6 +29,9 @@
 /* Stop Bluetooth heartbeat after this many seconds of inactivity */
 #define BLUETOOTH_TIMEOUT (10*60)
 
+/* For debug */
+#define DEBUG_LOG
+
 static void *(*BluetoothHeartbeat)(void *, long long);
 static void (*BluetoothHeartbeat_beat)(void *);
 
@@ -236,6 +239,36 @@ bool BluetoothPageTurner::scanDevices()
 	return devicesAdded;
 }
 
+long diff(struct timespec start, struct timespec end)
+{
+	struct timespec temp;
+	if ((end.tv_nsec-start.tv_nsec) < 0) {
+		temp.tv_sec = end.tv_sec - start.tv_sec - 1;
+		temp.tv_nsec = 1000000000 + end.tv_nsec - start.tv_nsec;
+	} else {
+		temp.tv_sec = end.tv_sec - start.tv_sec;
+		temp.tv_nsec = end.tv_nsec - start.tv_nsec;
+	}
+	return (temp.tv_sec * 1000 + (long)temp.tv_nsec / 1000000);
+}
+
+bool doInvokeCommand(QString prevMethod, QString nowMethod,
+	struct timespec prevTime, struct timespec nowTime)
+{
+	if (prevMethod == "") return true;
+
+	if (prevMethod != nowMethod) return true;
+
+	long diffms = diff(prevTime, nowTime);
+	if (diffms >= 380) {
+		return true;
+	}
+
+	nh_log("Apply filter - diffms %ld", diffms);
+
+	return false;
+}
+
 void BluetoothPageTurner::run()
 {
 	void *bluetoothHeartbeat = NULL;
@@ -243,6 +276,9 @@ void BluetoothPageTurner::run()
 	struct timeval tv;
 	struct timespec last_event = { 0 };
 	struct timespec now = { 0 };
+
+	struct timespec prevTime, nowTime;
+	QString lastMethod = "";
 
 	nh_log("starting");
 
@@ -304,7 +340,13 @@ void BluetoothPageTurner::run()
 		ret = select(FD_SETSIZE, &rfds, NULL, NULL, &tv);
 		if (ret <= 0) {
 			continue;
-		}
+		}		
+
+		clock_gettime(CLOCK_MONOTONIC, &nowTime);
+
+		#ifdef DEBUG_LOG		
+		nh_log("after select call");
+		#endif /* DEBUG_LOG */
 
 		/* Process events for each device */
 		for (auto it = devices.begin(); it != devices.end();) {
@@ -330,9 +372,18 @@ void BluetoothPageTurner::run()
 				continue;
 			}
 
+			#ifdef DEBUG_LOG
+			nh_log("readed event, type(%d), code(%d), value(%d)", e.type, e.code, e.value);
+			#endif /* DEBUG_LOG */
+
 			for (int i = 0; i < device.cfg.size(); i++) {
 				auto &pair = device.cfg[i];
 				struct input_event test = pair.first;
+
+				#ifdef DEBUG_LOG
+				nh_log("cfg index(%d) - type(%d), code(%d), value(%d)", i, test.type, test.code, test.value);
+				#endif /* DEBUG_LOG */
+
 				if (e.type == test.type &&
 				    e.code == test.code &&
 				    e.value == test.value) {
@@ -346,9 +397,23 @@ void BluetoothPageTurner::run()
 					/* Invoke the configured method */
 					const char *method = pair.second
 						.toStdString().c_str();
-					invokeMainWindowController(method);
+
+					if (doInvokeCommand(lastMethod, pair.second, prevTime, nowTime)) {
+						invokeMainWindowController(method);
+					}
+
+					prevTime = nowTime;
+					lastMethod = pair.second;
+
+					#ifdef DEBUG_LOG
+					nh_log("cfg index(%d) - after matched invokeController", i);
+					#endif /* DEBUG_LOG */
 				}
 			}
+
+			#ifdef DEBUG_LOG
+			nh_log("after search invokeController");
+			#endif /* DEBUG_LOG */
 
 			it++;
 		}
